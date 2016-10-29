@@ -31,7 +31,7 @@ Object lsa {
   def wikiXmlToPlainText(xml: String): Option[(String, String)] = {
     val page = new EnglishWikipediaPage()
     WikipediaPage.readPage(page, xml)
-    if(page.isEmpty) None
+    if(page.isEmpty || !page.isArticle || page.isRedirect || page.getTitle.contains("disambiguation")) None
     else Some((page.getTitle, page.getContent))
   }
 
