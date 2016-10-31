@@ -19,8 +19,11 @@ Object lsa {
   @transient val conf = new Configuration()
   conf.set(XMLInputFormat.START_TAG_KEY, "<page>")
   conf.set(XMLInputFormat.END_TAG_KEY, "</page>")
+  
+  //Sample this down to a fraction of articles for smaller clusters
   //val kvs = sc.newAPIHadoopFile(path, classOf[XMLInputFormat], classOf[LongWritable], classOf[Text], conf)
   val kvs = sc.newAPIHadoopFile(path, classOf[XMLInputFormat], classOf[LongWritable], classOf[Text], conf).sample(false, 0.01, System.currentTimeMillis().toInt)
+
   val rawXmls = kvs.map(p => p._2.toString)
 
   
@@ -94,6 +97,12 @@ Object lsa {
     }
     termFreqs
   })
+
+  //Optionally save this to hdfs to avoid recomputing if you want to discontinue now and resume later
+  //sc.saveAsTextFile("docTermFreqs")
+
+  //Read the saved docTermFreqs from hdfs
+  //val docTermFreqs = readDocTermfreqs("docTermFreqs")
 
   docTermFreqs.cache()
 
