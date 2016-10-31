@@ -112,7 +112,7 @@ Object lsa {
 
   //calculating inverse document frequencies
   val idfs = docFreqs.map { case(term, count) => (term, math.log(numDocs.toDouble / count))}.collectAsMap
-
+  
   //Assigning Ids to the String terms
   val termIds = idfs.keys.zipWithIndex.toMap
   val bTermIds = sc.broadcast(termIds).value
