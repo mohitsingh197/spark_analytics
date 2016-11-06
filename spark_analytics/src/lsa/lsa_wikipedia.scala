@@ -10,7 +10,10 @@ Object lsa {
    }
 
 
-  //Turn wikipedia xml dump into String XML documents
+  /* 
+   *Turn wikipedia xml dump into String XML documents - Starts
+   *
+   */
   import edu.umd.cloud9.collection.XMLInputFormat
   import org.apache.hadoop.conf.Configuration
   import org.apache.hadoop.io._
@@ -22,12 +25,16 @@ Object lsa {
   
   //Sample this down to a fraction of articles for smaller clusters
   //val kvs = sc.newAPIHadoopFile(path, classOf[XMLInputFormat], classOf[LongWritable], classOf[Text], conf)
-  val kvs = sc.newAPIHadoopFile(path, classOf[XMLInputFormat], classOf[LongWritable], classOf[Text], conf).sample(false, 0.01, System.currentTimeMillis().toInt)
+  val kvs = sc.newAPIHadoopFile(path, classOf[XMLInputFormat], classOf[LongWritable], classOf[Text], conf).sample(false, 0.001, System.currentTimeMillis().toInt)
 
   val rawXmls = kvs.map(p => p._2.toString)
+  //Turn wikipedia xml dump into String XML documents - Ends
 
   
-  //Turning wiki XML into plain text documents
+  /* 
+   *Turning wiki XML into plain text document - Starts
+   *
+   */
   import edu.umd.cloud9.collection.wikipedia.language._
   import edu.umd.cloud9.collection.wikipedia._
   
@@ -40,9 +47,13 @@ Object lsa {
 
   //Documents keyed by title
   val plainText = rawXmls.flatMap(wikiXmlToPlainText)
+  //Turning wiki XML into plain text documents - Ends
 
 
-  //Lemmatization of documents
+  /* 
+   *Lemmatization of documents - Starts
+   *
+   */
   import edu.stanford.nlp.pipeline._
   import edu.stanford.nlp.ling.CoreAnnotations._
   import java.util.Properties
@@ -83,9 +94,13 @@ Object lsa {
     it.map { case(title, contents) => plainTextToLemmas(contents, stopwords, pipeline)
     }
   })
+  //Lemmatization of documents - Ends
 
   
-  //Computing TF-IDF
+  /* 
+   *Computing TF-IDF - Starts
+   *
+   */
   import scala.collection.mutable.HashMap
 
   val docTermFreqs = lemmatized.map(terms => {
@@ -135,17 +150,23 @@ Object lsa {
     Vectors.sparse(bTermIds.size, termScores)
   })
 
+  //Computing TF-IDF - Ends
+
   
-  //Find Singular Value Decomposition(SVD) of the Vectors
+  /* 
+   *Find Singular Value Decomposition(SVD) of the Vectors - Starts
+   *
+   */
   import org.apache.spark.mllib.linalg.distributed.RowMatrix
 
   vecs.cache()
   val mat = new RowMatrix(vecs)
   val k = 1000
   val svd = mat.computeSVD(k, computeU=true)  
+  //Find Singular Value Decomposition(SVD) of the Vectors - Ends
 
   
-  //Find top terms in top concepts
+  //Find top terms in top concepts by frequency count
   def topTermsInTopConcepts(svd: SingularValueDecomposition, numConcepts: Int, numTerms: Int, termIds: Map[Long, String]): Seq[Seq[String, Double]] =  {
     val v = svd.V
     val topTerms = new ArrayBuffer[Seq[String, Double]]()
@@ -161,7 +182,7 @@ Object lsa {
     topTerms
   }
 
-  //Find top documentsin top concepts
+  //Find top documentsin top concepts by frequency count
   def topDocsInTopConcepts(svd: SingularValueDecomposition, numConcepts: Int, numDocs: Int, docIds: Map[Long, String]): Seq[Seq[String, Double]] =  {
     val u = svd.U
     val topDocs = new ArrayBuffer[Seq[String, Double]]()
@@ -182,5 +203,151 @@ Object lsa {
     println()
   }
 
+  /* 
+   * Term -Term Relevance - Starts
+   *
+   */
+
+   import breeze.linalg.{DenseMatrix => BDenseMatrix, DenseVector => BDenseVector,
+SparseVector => BSparseVector}
+   
+  //Selects a row from a matrix   
+  def row(mat: BDenseMatrix[Double], index: Int): Seq[Double] = {
+    (0 until mat.cols).map(c => mat(index, c))
+  }
+
+  //Selects a row from a matrix.
+  def row(mat: Matrix, index: Int): Seq[Double] = {
+    val arr = mat.toArray
+    (0 until mat.numCols).map(i => arr(index + i * mat.numRows))
+  }
+
+  //Selects a row from a distributed matrix.
+  def row(mat: RowMatrix, id: Long): Array[Double] = {
+    mat.rows.zipWithUniqueId.map(_.swap).lookup(id).head.toArray
+  }
+  
+  //Finds the product of a dense matrix and a diagonal matrix represented by a vector.
+  //Breeze doesn't support efficient diagonal representations, so multiply manually.
+  def multiplyByDiagonalMatrix(mat: Matrix, diag: Vector): BDenseMatrix[Double] = {
+    val sArr = diag.toArray
+    new BDenseMatrix[Double](mat.numRows, mat.numCols, mat.toArray)
+      .mapPairs{case ((r, c), v) => v * sArr(c)}
+  }
+
+  //Finds the product of a distributed matrix and a diagonal matrix represented by a vector.
+  def multiplyByDiagonalMatrix(mat: RowMatrix, diag: Vector): RowMatrix = {
+    val sArr = diag.toArray
+    new RowMatrix(mat.rows.map(vec => {
+      val vecArr = vec.toArray
+      val newArr = (0 until vec.size).toArray.map(i => vecArr(i) * sArr(i))
+      Vectors.dense(newArr)
+    }))
+  }
+
+  //Returns a matrix where each row is divided by its length.
+  def rowsNormalized(mat: BDenseMatrix[Double]): BDenseMatrix[Double] = {
+    val newMat = new BDenseMatrix[Double](mat.rows, mat.cols)
+    for (r <- 0 until mat.rows) {
+      val length = math.sqrt((0 until mat.cols).map(c => mat(r, c) * mat(r, c)).sum)
+      (0 until mat.cols).map(c => newMat.update(r, c, mat(r, c) / length))
+    }
+    newMat
+  }
+
+  //Returns a distributed matrix where each row is divided by its length.
+  def rowsNormalized(mat: RowMatrix): RowMatrix = {
+    new RowMatrix(mat.rows.map(vec => {
+      val length = math.sqrt(vec.toArray.map(x => x * x).sum)
+      Vectors.dense(vec.toArray.map(_ / length))
+    }))
+  }
+
+  //Finds terms relevant to a term. Returns the term IDs and scores for the terms with the highest relevance scores to the given term.
+  def topTermsForTerm(normalizedVS: BDenseMatrix[Double], termId: Int): Seq[(Double, Int)] = {
+    // Look up the row in VS corresponding to the given term ID.
+    val termRowVec = new BDenseVector[Double](row(normalizedVS, termId).toArray)
+
+    // Compute scores against every term
+    val termScores = (normalizedVS * termRowVec).toArray.zipWithIndex
+
+    // Find the terms with the highest scores
+    termScores.sortBy(-_._1).take(10)
+  }
+
+  val VS = multiplyByDiagonalMatrix(svd.V, svd.s)
+  val normalizedVS = rowsNormalized(VS)
+  
+  //Finds docs relevant to a doc. Returns the doc IDs and scores for the docs with the highest relevance scores to the given doc.
+  def topDocsForDoc(normalizedUS: RowMatrix, docId: Long): Seq[(Double, Long)] = {
+    // Look up the row in US corresponding to the given doc ID.
+    val docRowArr = row(normalizedUS, docId)
+    val docRowVec = Matrices.dense(docRowArr.length, 1, docRowArr)
+
+    // Compute scores against every doc
+    val docScores = normalizedUS.multiply(docRowVec)
+
+    // Find the docs with the highest scores
+    val allDocWeights = docScores.rows.map(_.toArray(0)).zipWithUniqueId
+
+    // Docs can end up with NaN score if their row in U is all zeros.  Filter these out.
+    allDocWeights.filter(!_._1.isNaN).top(10)
+  }
+
+  //Finds docs relevant to a term. Returns the doc IDs and scores for the docs with the highest relevance scores to the given term.
+  def topDocsForTerm(US: RowMatrix, V: Matrix, termId: Int): Seq[(Double, Long)] = {
+    val termRowArr = row(V, termId).toArray
+    val termRowVec = Matrices.dense(termRowArr.length, 1, termRowArr)
+
+    // Compute scores against every doc
+    val docScores = US.multiply(termRowVec)
+
+    // Find the docs with the highest scores
+    val allDocWeights = docScores.rows.map(_.toArray(0)).zipWithUniqueId
+    allDocWeights.top(10)
+  }
+
+  def termsToQueryVector(terms: Seq[String], idTerms: Map[String, Int], idfs: Map[String, Double])
+    : BSparseVector[Double] = {
+    val indices = terms.map(idTerms(_)).toArray
+    val values = terms.map(idfs(_)).toArray
+    new BSparseVector[Double](indices, values, idTerms.size)
+  }
+
+  def topDocsForTermQuery(US: RowMatrix, V: Matrix, query: BSparseVector[Double])
+    : Seq[(Double, Long)] = {
+    val breezeV = new BDenseMatrix[Double](V.numRows, V.numCols, V.toArray)
+    val termRowArr = (breezeV.t * query).toArray
+
+    val termRowVec = Matrices.dense(termRowArr.length, 1, termRowArr)
+
+    // Compute scores against every doc
+    val docScores = US.multiply(termRowVec)
+
+    // Find the docs with the highest scores
+    val allDocWeights = docScores.rows.map(_.toArray(0)).zipWithUniqueId
+    allDocWeights.top(10)
+  }
+
+  def printTopTermsForTerm(normalizedVS: BDenseMatrix[Double],
+      term: String, idTerms: Map[String, Int], termIds: Map[Int, String]) {
+    printIdWeights(topTermsForTerm(normalizedVS, idTerms(term)), termIds)
+  }
+
+  def printTopDocsForDoc(normalizedUS: RowMatrix, doc: String, idDocs: Map[String, Long],
+      docIds: Map[Long, String]) {
+    printIdWeights(topDocsForDoc(normalizedUS, idDocs(doc)), docIds)
+  }
+
+  def printTopDocsForTerm(US: RowMatrix, V: Matrix, term: String, idTerms: Map[String, Int],
+      docIds: Map[Long, String]) {
+    printIdWeights(topDocsForTerm(US, V, idTerms(term)), docIds)
+  }
+
+  def printIdWeights[T](idWeights: Seq[(Double, T)], entityIds: Map[T, String]) {
+    println(idWeights.map{case (score, id) => (entityIds(id), score)}.mkString(", "))
+  }
+
+  
 }
 

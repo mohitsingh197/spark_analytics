@@ -1,9 +1,10 @@
 import scala.collection.mutable.HashMap
+import org.apache.spark.rdd._
 
 Object lsaUtil {
 
   //Convert docTermFreqs map stored as String on hdfs to map
-  def readDocTermfreqs(path: String) {
+  def readDocTermfreqs(path: String): RDD[HashMap[String, Int]] = {
     val docTermFreqsMapStr = sc.textFile(path)
     val docTermFreqs = docTermFreqsMapStr.map(l => l.replaceAll("Map", "")).map(l => l.replaceAll("\\(","")).map(l => l.replaceAll("\\)","")).map{
       l => 
@@ -18,5 +19,6 @@ Object lsaUtil {
       }
       docTermMap
     }
+   docTermFreqs
   }
 }
