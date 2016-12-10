@@ -1,4 +1,18 @@
-Object lsa {
+import scala.collection.Map
+
+import org.apache.spark.SparkContext
+import org.apache.spark.mllib.linalg.Matrix
+import org.apache.spark.mllib.linalg.SingularValueDecomposition
+import org.apache.hadoop.io.LongWritable
+import edu.stanford.nlp.ling.CoreAnnotations.SentencesAnnotation
+import org.apache.hadoop.io.Text
+import edu.stanford.nlp.ling.CoreAnnotations.TokensAnnotation
+import edu.stanford.nlp.ling.CoreAnnotations.LemmaAnnotation
+import org.apache.spark.mllib.linalg.Matrices
+
+object lsa {
+  
+   val sc = new SparkContext
    
    //Term Document Matrix weighing scheme. term frequency times inverse document frequency (TF-IDF)
    def termDocWeight(termFrequencyInDoc: Int, totalTermsInDoc: Int, termFreqInCorpus: Int, totalDocs: Int): Double = {
@@ -16,7 +30,6 @@ Object lsa {
    */
   import edu.umd.cloud9.collection.XMLInputFormat
   import org.apache.hadoop.conf.Configuration
-  import org.apache.hadoop.io._
   
   val path = "wikipedia/enwiki-20160820-pages-articles-multistream.xml"
   @transient val conf = new Configuration()
@@ -31,12 +44,12 @@ Object lsa {
   //Turn wikipedia xml dump into String XML documents - Ends
 
   
+  import edu.umd.cloud9.collection.wikipedia._
   /* 
    *Turning wiki XML into plain text document - Starts
    *
    */
   import edu.umd.cloud9.collection.wikipedia.language._
-  import edu.umd.cloud9.collection.wikipedia._
   
   def wikiXmlToPlainText(xml: String): Option[(String, String)] = {
     val page = new EnglishWikipediaPage()
@@ -55,10 +68,9 @@ Object lsa {
    *
    */
   import edu.stanford.nlp.pipeline._
-  import edu.stanford.nlp.ling.CoreAnnotations._
   import java.util.Properties
-  import scala.collection.mutable.ArrayBuffer
   import scala.collection.JavaConversions._
+  import scala.collection.mutable.ArrayBuffer
 
   def createNLPPipeline(): StanfordCoreNLP = {
     val props = new Properties()
@@ -140,6 +152,8 @@ Object lsa {
   //Assigning Ids to the String terms
   val termIds = idfs.keys.zipWithIndex.toMap
   val bTermIds = sc.broadcast(termIds).value
+  
+  val docIds = docFreqs.map(_._1).zipWithIndex().collectAsMap()
 
   //Creating TF_IDF weighted vector
   import org.apache.spark.mllib.linalg.Vectors
@@ -167,9 +181,9 @@ Object lsa {
 
   
   //Find top terms in top concepts by frequency count
-  def topTermsInTopConcepts(svd: SingularValueDecomposition, numConcepts: Int, numTerms: Int, termIds: Map[Long, String]): Seq[Seq[String, Double]] =  {
+  def topTermsInTopConcepts(svd: SingularValueDecomposition[RowMatrix, Matrix], numConcepts: Int, numTerms: Int, termIds: Map[Int, String]): Seq[Seq[(String, Double)]] =  {
     val v = svd.V
-    val topTerms = new ArrayBuffer[Seq[String, Double]]()
+    val topTerms = new ArrayBuffer[Seq[(String, Double)]]
     val arr = v.toArray
     for (i <- 0 until numConcepts) {
       val offs = i * v.numRows
@@ -183,9 +197,9 @@ Object lsa {
   }
 
   //Find top documentsin top concepts by frequency count
-  def topDocsInTopConcepts(svd: SingularValueDecomposition, numConcepts: Int, numDocs: Int, docIds: Map[Long, String]): Seq[Seq[String, Double]] =  {
+  def topDocsInTopConcepts(svd: SingularValueDecomposition[RowMatrix, Matrix], numConcepts: Int, numDocs: Int, docIds: Map[Long, String]): Seq[Seq[(String, Double)]] =  {
     val u = svd.U
-    val topDocs = new ArrayBuffer[Seq[String, Double]]()
+    val topDocs = new ArrayBuffer[Seq[(String, Double)]]()
     for (i <- 0 until numConcepts) {
       val docWeights = u.rows.map(_.toArray(i)).zipWithUniqueId()
       topDocs += docWeights.top(numDocs).map {
@@ -195,11 +209,11 @@ Object lsa {
     topDocs    
   }
 
-  val topConceptTerms = topTermsInTopConcepts(svd, 4, 10, termIds)
-  val topConceptDocs = topDocsInTopConcepts(svd, 4, 10, termIds)
+  val topConceptTerms = topTermsInTopConcepts(svd, 4, 10, termIds.map(_.swap))
+  val topConceptDocs = topDocsInTopConcepts(svd, 4, 10, docIds.map(_.swap))
   for((terms, docs) <- topConceptTerms.zip(topConceptDocs) ) {
     println("Concept terms: " + terms.map(_._1).mkString(", "))
-    println("Concept docs: " + docs.map(_._1)).mkString(", "))
+    println("Concept docs: " + docs.map(_._1).mkString(", "))
     println()
   }
 
@@ -208,8 +222,7 @@ Object lsa {
    *
    */
 
-   import breeze.linalg.{DenseMatrix => BDenseMatrix, DenseVector => BDenseVector,
-SparseVector => BSparseVector}
+   import breeze.linalg.{ DenseMatrix => BDenseMatrix, DenseVector => BDenseVector, SparseVector => BSparseVector }
    
   //Selects a row from a matrix   
   def row(mat: BDenseMatrix[Double], index: Int): Seq[Double] = {
@@ -229,14 +242,14 @@ SparseVector => BSparseVector}
   
   //Finds the product of a dense matrix and a diagonal matrix represented by a vector.
   //Breeze doesn't support efficient diagonal representations, so multiply manually.
-  def multiplyByDiagonalMatrix(mat: Matrix, diag: Vector): BDenseMatrix[Double] = {
+  def multiplyByDiagonalMatrix(mat: Matrix, diag: Vector[Double]): BDenseMatrix[Double] = {
     val sArr = diag.toArray
     new BDenseMatrix[Double](mat.numRows, mat.numCols, mat.toArray)
       .mapPairs{case ((r, c), v) => v * sArr(c)}
   }
 
   //Finds the product of a distributed matrix and a diagonal matrix represented by a vector.
-  def multiplyByDiagonalMatrix(mat: RowMatrix, diag: Vector): RowMatrix = {
+  def multiplyByDiagonalMatrix(mat: RowMatrix, diag: Vector[Double]): RowMatrix = {
     val sArr = diag.toArray
     new RowMatrix(mat.rows.map(vec => {
       val vecArr = vec.toArray
@@ -245,7 +258,7 @@ SparseVector => BSparseVector}
     }))
   }
 
-  //Returns a matrix where each row is divided by its length.
+  //Returns a matrix where each row element is divided by its length.
   def rowsNormalized(mat: BDenseMatrix[Double]): BDenseMatrix[Double] = {
     val newMat = new BDenseMatrix[Double](mat.rows, mat.cols)
     for (r <- 0 until mat.rows) {
